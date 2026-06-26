@@ -8,6 +8,8 @@ This document covers strategy, build order, and open design decisions.
 
 **Related:** [Memory Architecture Knowledge Base (MAK)](memory-knowledge.md) — how Membrane ingests papers, docs, and blogs into a structured catalog + evidence corpus that powers recommendations.
 
+**Profiling deep dive:** [profiling.md](profiling.md) — how we build `AgentProfile` from a codebase and/or product website.
+
 ---
 
 ## How MAK → best architecture (end-to-end)
@@ -33,8 +35,8 @@ flowchart TB
   end
 
   subgraph step2 ["Step 2 — Generate candidates"]
-    Filter["Hard constraint filter"]
-    Compose["ArchitectureComposer"]
+    Retrieve["Profile-similarity retrieval"]
+    Compose["ArchitectureComposer + MAK"]
     Cands["3-5 candidate architectures"]
   end
 
@@ -54,12 +56,13 @@ flowchart TB
   Corpus --> ProfAgents
   ProfAgents --> Profile
 
-  Profile --> Filter
-  Catalog --> Filter
+  Profile --> Retrieve
+  Catalog --> Retrieve
+  Corpus --> Retrieve
+  Retrieve --> Compose
   Taxonomy --> Compose
   Catalog --> Compose
-  Corpus --> Compose
-  Filter --> Compose --> Cands
+  Compose --> Cands
 
   Profile --> Synth
   Cands --> Eval
@@ -79,7 +82,7 @@ flowchart TB
 | Step | What happens | How MAK is used |
 |---|---|---|
 | **1. Profile** | Understand the customer's product | RAG retrieves relevant papers/docs while profiling ("cyber agents need causal graphs — see MAGMA, Graphiti docs") |
-| **2. Compose** | Narrow 50+ patterns → 3–5 candidates | Catalog taxonomy filter + memory-need coverage + RAG comparison |
+| **2. Compose** | Narrow 50+ patterns → 3–5 candidates | Profile-similarity retrieval + MAK RAG + LLM composition (no binary elimination) |
 | **3. Evaluate** | Measure candidates on benchmarks | `eval_affinities` per pattern; `reported_metrics` as priors; synthetic traces from profile |
 | **4. Select** | Rank by quality + constraints | Weighted scoring from profile; cross-source citations in report |
 | **5. Deploy handoff** | Emit manifest for Part B | Winner's catalog entry → `DeploymentManifest` |
@@ -115,45 +118,46 @@ Query: "memory architecture for security agent event logs causal reasoning on-pr
 
 Without MAK, the profiler guesses. With MAK, it grounds claims in the field's knowledge.
 
-### Step 2 — Generate candidates (catalog + MAK)
+### Step 2 — Generate candidates (no hard filters)
+
+We **do not** use rule-based hard filters (no "disqualify if on-prem"). Constraints are scored dimensions in eval and selection — architectures that poorly fit latency, privacy, or compliance sink in the ranking instead of being removed upfront.
 
 `ArchitectureComposer` runs three passes:
 
-**Pass A — Hard filter (catalog)**
+**Pass A — Profile-similarity retrieval (catalog + MAK)**
 
 ```python
-# Eliminate impossible architectures
-candidates = catalog.all_patterns()
-candidates = [p for p in candidates if p.meets_privacy(profile.constraints.privacy)]
-candidates = [p for p in candidates if p.latency_profile fits profile.constraints.latency_p99_ms]
-candidates = [p for p in candidates if p.covers_required_compliance(profile.constraints.compliance)]
-# e.g. 52 patterns → 18 survivors
+# Find patterns most relevant to this profile — similarity, not elimination
+query = profile.to_search_query()  # product_type + memory_needs + query_patterns
+retrieved = mak.search(query, top_k=15)
+ranked = catalog.rank_by_need_coverage(profile.memory_needs, candidates=retrieved)
+# 52 patterns → top ~12 by relevance (every pattern still eligible if eval surprises)
 ```
 
-**Pass B — Memory-need coverage (catalog + taxonomy)**
+Product-type priors (e.g. cyber → graph-heavy patterns) **boost** ranking, they don't gate.
+
+**Pass B — LLM composition (MAK context)**
 
 ```python
-# Score survivors by how well they cover profile.memory_needs
-scored = [(p, coverage_score(p, profile.memory_needs)) for p in candidates]
-# temporal_graph covers temporal; vector_rag alone scores low on causal
-top = scored[:10]
-```
-
-**Pass C — RAG enrichment + composition (corpus)**
-
-```python
-# Retrieve comparative evidence from MAK
-context = mak.search(
-  f"best memory architecture for {profile.product_type} "
-  f"needs {profile.memory_needs} constraints {profile.constraints}"
+context = mak.compare(ranked[:8])  # comparative evidence from papers, docs, blogs
+candidates = composer_llm(
+    profile=profile,
+    context=context,
+    instruction="Propose 3-5 diverse architectures to benchmark. "
+                "Include vector_rag as baseline. "
+                "Note constraint tradeoffs but do not exclude options.",
 )
-# LLM composes 3-5 hybrid candidates from top patterns + context
-# e.g. ["vector_rag", "temporal_graph", "multi_graph_hybrid", "cybersecurity_recipe"]
+# e.g. ["vector_rag", "temporal_graph", "multi_graph_hybrid", "mem0_universal"]
 ```
 
-`cybersecurity_recipe` might be a catalog recipe: `TemporalGraph + EntityGraph + CausalGraph + AuditProvenance`.
+Constraints go into the prompt as **preferences to weigh**, not if/else rules:
+> "Customer wants on-prem, p99 < 200ms, audit logs — prefer patterns that fit but include simpler alternatives for comparison."
 
-**Output:** 3–5 candidates, always including a baseline (`vector_rag`) to beat.
+**Pass C — Diversity check**
+
+Ensure candidates span a range (simple → complex, vector → graph) so eval can show tradeoffs in the report.
+
+**Output:** 3–5 candidates for eval, always including `vector_rag` baseline.
 
 ### Step 3 — Evaluate (prove it, don't guess)
 
@@ -170,10 +174,16 @@ for arch in candidates:
     adapter = load_adapter(arch.implementation.reference_impl)
     adapter.ingest(eval_corpus.events)
     results = adapter.run_queries(eval_corpus.questions)
-    scores[arch.id] = judge(results, eval_corpus.ground_truth)
-    scores[arch.id].latency = measure_p99(adapter)
-    scores[arch.id].cost = estimate_cost(arch, profile.scale)
+    scores[arch.id] = {
+        "quality": judge(results, eval_corpus.ground_truth),      # temporal, causal, semantic
+        "latency_fit": measure_latency_fit(adapter, profile.constraints),  # 0-1 vs p99 budget
+        "privacy_fit": score_privacy_fit(arch, profile.constraints),
+        "compliance_fit": score_compliance_fit(arch, profile.constraints),
+        "cost_fit": estimate_cost_fit(arch, profile.scale, profile.constraints),
+    }
 ```
+
+Constraints are **measured**, not assumed from catalog metadata. A pattern that claims on-prem support but fails isolation tests scores low on `privacy_fit`.
 
 **MAK role in eval:**
 - `catalog[pattern].eval_affinities` → which benchmark suites to run
@@ -182,25 +192,34 @@ for arch in candidates:
 
 **Example scores (cybersecurity profile):**
 
-| Architecture | Temporal | Causal | Semantic | p99 ms | Overall |
+| Architecture | Quality | Latency fit | Privacy fit | Compliance fit | Overall |
 |---|---|---|---|---|---|
-| vector_rag | 0.22 | 0.18 | 0.71 | 45 | 0.41 |
-| temporal_graph | 0.78 | 0.35 | 0.55 | 120 | 0.62 |
-| multi_graph_hybrid | 0.91 | 0.89 | 0.68 | 180 | **0.87** |
-| mem0_universal | 0.31 | 0.24 | 0.74 | 60 | 0.48 |
+| vector_rag | 0.41 | 0.95 | 0.90 | 0.20 | 0.52 |
+| temporal_graph | 0.62 | 0.70 | 0.85 | 0.55 | 0.64 |
+| multi_graph_hybrid | 0.87 | 0.75 | 0.88 | 0.92 | **0.84** |
+| mem0_universal | 0.48 | 0.88 | 0.40 | 0.30 | 0.45 |
+
+`mem0_universal` stays in the race — it scores well on latency but tanks on privacy/compliance fit for this profile. The report explains that, rather than hiding it behind a filter.
 
 ### Step 4 — Select and explain
 
-Weighted scoring from profile constraints:
+Weighted scoring — profile constraints set the weights, not binary gates:
 
 ```python
 weights = derive_weights(profile)
-# cyber + explainability required → high weight on causal, temporal, explainability
-# latency_p99 200ms → penalize multi_graph if p99=180 borderline vs vector at 45ms
+# cyber profile → high weight on quality (causal/temporal) + compliance_fit
+# latency_p99 200ms → latency_fit weighted heavily but 0.75 still competes
 
-final = weighted_score(scores, weights)
-winner = max(final, key=final.get)
+overall = (
+    weights.quality * scores.quality
+  + weights.latency * scores.latency_fit
+  + weights.privacy * scores.privacy_fit
+  + weights.compliance * scores.compliance_fit
+  + weights.cost * scores.cost_fit
+)
 ```
+
+No disqualification. Low constraint fit → low overall → ranked down + called out in report.
 
 **RecommendationReport** cites MAK + eval:
 
@@ -344,9 +363,9 @@ Why first: Everything else reads/writes these artifacts. Part B can build agains
 How it works:
 1. Load `AgentProfile`
 2. `ArchitectureComposer` proposes candidates from catalog using:
-   - Product-type priors (cybersecurity → multi-graph hybrid)
-   - Memory-need tags (temporal, causal, audit → require matching patterns)
-   - Hard constraint filters (on_prem, latency_p99, compliance)
+   - Profile-similarity retrieval from MAK + catalog
+   - Memory-need coverage as ranking signal (not elimination)
+   - Constraint fit scored in Phase A2 eval (not filtered in Phase A1)
 3. Score candidates with **affinity weights** from catalog (not benchmark runs yet)
 4. Output ranked list + explanation
 
@@ -389,35 +408,18 @@ Initial adapters to eval (minimal, can live in Part A or shared `adapters/`):
 
 ### Phase A3 — Profiling agents (week 4–6)
 
-**Goal:** Automate `AgentProfile` generation from customer inputs.
+**Goal:** Automate `AgentProfile` from codebase and/or product website.
 
-**Recommended approach: static analysis + LLM synthesis**
+See **[profiling.md](profiling.md)** for full design. Summary:
 
-```
-Repo ──► Static extractors ──► Evidence bundle ──► LLM ──► AgentProfile
-              │                                      ▲
-Spec/docs ────┴──────────────────────────────────────┘
-Constraints ──────────────────────────────────────────┘
-```
+1. **Collect** — `CodebaseBundle` (tree, deps, memory signals, smart file select) + `ProductSurfaceBundle` (crawl website)
+2. **MAK inject** — retrieve relevant memory-architecture context
+3. **Analyze** — ProductSurfaceAgent, CodebaseAgent, MemoryInferenceAgent, ConstraintMerger (LLM structured output)
+4. **Merge** → `AgentProfile` with per-field confidence + evidence
 
-Static extractors (language-agnostic where possible):
-- Directory structure, entry points, README
-- Data models (SQLAlchemy, Pydantic, Prisma schemas)
-- Event/log patterns (Kafka, webhooks, audit tables)
-- Existing memory usage (vector DB imports, Redis, graph DB clients)
-- API routes and agent tool definitions
+At least one of codebase or product URL required. Stated constraints override inferred.
 
-LLM role: synthesize evidence → structured `AgentProfile`, cite sources, flag uncertainties.
-
-Agents:
-| Agent | Static input | LLM output fields |
-|---|---|---|
-| CodebaseAnalyzer | AST, imports, schemas, infra deps | data_modalities, memory_needs, scale signals, existing_memory |
-| ProductSpecAgent | README, docs, agent spec | product_type, query_patterns, user journeys |
-| ConstraintExtractor | Config, natural language requirements | constraints block |
-| TraceSynthesizer | Profile + codebase context | synthetic eval corpus |
-
-Human-in-the-loop: profile is reviewable/editable before eval runs. Enterprise customers will want this.
+Human-in-the-loop: profile reviewable before eval; `needs_clarification` when confidence low.
 
 ### Phase A4 — Full pipeline + API (week 6–8)
 
@@ -468,7 +470,7 @@ Structured intake form: product type, latency budget, compliance, data types. Op
 
 ### Option A: Profile-only / rule-based (Phase A1)
 
-Catalog affinity + constraint filtering. No benchmark runs.
+Catalog affinity + constraint fit scoring. No benchmark runs.
 
 | Pros | Cons |
 |---|---|
@@ -504,47 +506,45 @@ Full adapter implementations before any profiling.
 
 How to go from `AgentProfile` → candidate architectures.
 
-### Step 1: Hard constraint filtering
+**Design choice:** No hard filters. Constraints shape weights and eval dimensions; the report surfaces tradeoffs instead of silently dropping options.
 
-Eliminate architectures that violate non-negotiables:
+### Step 1: Profile-similarity retrieval
 
-```
-if profile.constraints.privacy == "on_prem":
-    exclude patterns requiring managed cloud-only services
+Retrieve top patterns from MAK + catalog by relevance to the profile:
 
-if profile.constraints.latency_p99_ms < 300:
-    exclude patterns without cache/fast-path component
-
-if "audit_log" in profile.constraints.compliance:
-    require AuditProvenance pattern in composition
+```python
+ranked = mak.retrieve_for_profile(profile, top_k=12)
+# Boost (not gate) by product_type prior and memory_need coverage
 ```
 
-### Step 2: Memory-need coverage scoring
-
-Each catalog pattern tags which `memory_needs` it satisfies:
-
-```yaml
-# catalog/patterns/temporal_graph.yaml
-memory_needs: [temporal, episodic]
-query_patterns: [temporal_reasoning, event_sequence]
-```
-
-Score = fraction of profile needs covered by the composition.
-
-### Step 3: Generate 3–5 compositions
+### Step 2: LLM composition (3–5 candidates)
 
 | Strategy | Description |
 |---|---|
-| **Single best** | Top-scoring monolithic pattern |
-| **Greedy compose** | Add patterns until all memory_needs covered |
-| **Catalog recipes** | Pre-defined hybrids per product_type (cybersecurity recipe) |
-| **Always include baseline** | vector_rag as floor comparison in every eval run |
+| **MAK-guided selection** | LLM picks diverse candidates from top-ranked + corpus evidence |
+| **Greedy compose** | Hybrid compositions that cover memory_needs |
+| **Catalog recipes** | Starting points per product_type (cybersecurity recipe, etc.) |
+| **Always include baseline** | `vector_rag` in every eval run |
 
-Output: `["vector_rag", "temporal_graph", "multi_graph_hybrid", "cybersecurity_recipe"]`
+Constraints passed as context: *"prefer on-prem, p99 < 200ms, audit required — still include simpler alternatives."*
 
-### Step 4: Eval replaces affinity scores
+### Step 3: Eval measures constraint fit
 
-Phase A2 runs benchmarks; affinity scores become priors, not final rankings.
+Phase A2 runs quality benchmarks **and** constraint stress tests:
+
+| Dimension | How measured |
+|---|---|
+| `quality` | LoCoMo / domain eval / synthetic traces |
+| `latency_fit` | Actual p99 under load vs budget |
+| `privacy_fit` | On-prem deployability, data residency, tenant isolation |
+| `compliance_fit` | Audit trail completeness, explainability |
+| `cost_fit` | Estimated $/month vs budget |
+
+Poor constraint fit → low score → ranked down. Not removed.
+
+### Step 4: Select with weighted scoring
+
+Affinity scores from catalog are **priors**; eval scores are **truth**. Profile constraints set dimension weights.
 
 ---
 
@@ -573,15 +573,12 @@ def score(architecture, profile, eval_results):
     performance = constraint_fit(eval_results.latency, profile.constraints)
     cost = constraint_fit(eval_results.cost, profile.constraints)
 
-    # Hard constraint violation → disqualify or heavy penalty
-    if violates_hard_constraints(architecture, profile):
-        return DISQUALIFIED
-
     return (
         0.55 * quality
       + 0.25 * performance
       + 0.20 * cost
     )
+    # Constraint dimensions (privacy_fit, compliance_fit) fold into performance/cost weights
 ```
 
 ### Explainability requirement

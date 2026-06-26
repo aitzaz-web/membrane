@@ -97,6 +97,7 @@ Current docs:
 
 - [System architecture](docs/architecture.md) — full diagrams, Part A / Part B split, handoff contract, catalog, eval engine, roadmap
 - [Part A: Analyze & Recommend](docs/part-a-analyze.md) — profiling, eval, selection strategy
+- [Profiling design](docs/profiling.md) — codebase + website → AgentProfile
 - [Memory Architecture Knowledge Base](docs/memory-knowledge.md) — ingesting papers, docs, and blogs into the catalog
 
 Planned next steps:

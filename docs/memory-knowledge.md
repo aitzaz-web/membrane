@@ -398,18 +398,18 @@ membrane knowledge compare mem0_universal graphiti temporal_graph
 ```
 AgentProfile
     +
-Catalog query (taxonomy filter)
+Profile-similarity retrieval (catalog + MAK)
     +
-RAG retrieval ("best memory for causal reasoning in security agents")
+RAG comparison across sources
     ↓
-3-5 candidate architectures with citations
+3-5 candidate architectures with citations (no hard elimination)
 ```
 
-The composer doesn't guess — it queries MAK:
-1. Filter catalog by hard constraints
-2. Rank by memory-need coverage
-3. Enrich with RAG across **all sources** ("3 papers + Mem0 docs support hybrid parametric+retrieval for voice agents")
-4. Propose candidates for eval
+The composer queries MAK:
+1. Retrieve top patterns by profile similarity + memory-need coverage
+2. LLM composes 3–5 diverse candidates (constraints as preferences, not gates)
+3. Enrich with RAG across **all sources**
+4. Pass all candidates to eval — constraint fit measured there, not filtered here
 
 ### Profiling agents
 
@@ -753,7 +753,7 @@ class MAKClient:
 
 Used by:
 - **Profiling agents** — `context_for_profile()` injects relevant papers/docs
-- **ArchitectureComposer** — `compare()` + taxonomy filter
+- **ArchitectureComposer** — `retrieve_for_profile()` + `compare()` → candidate set for eval
 - **Reporter** — `get_pattern()` + chunk citations for evidence section
 
 ### CLI (QuantMind-style UX)

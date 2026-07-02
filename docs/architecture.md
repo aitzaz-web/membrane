@@ -280,23 +280,36 @@ agent_profile:
 
 # 2. RecommendationReport — why this architecture won
 recommendation:
-  winner: multi_graph_hybrid
-  composition: [TemporalGraph, EntityGraph, CausalGraph, AuditProvenance]
+  winner:
+    type: hybrid
+    id: cybersecurity_soc_stack
+    name: SOC Investigation Memory Stack
   scores:
-    multi_graph_hybrid: 0.87
+    cybersecurity_soc_stack: 0.86
+    magma_multigraph: 0.84
     vector_rag: 0.41
-  explanation: "Causal reasoning eval decisive; vector-only failed temporal chain queries"
+  component_rationale:
+    incident_graph: "Graphiti covers temporal + causal eval; decisive for root-cause queries"
+    runbook_rag: "Vector RAG sufficient for runbook similarity; keeps latency low"
+  explanation: "Composed stack matched monolithic multi-graph on quality with better latency on simple queries"
 
 # 3. DeploymentManifest — machine-readable deploy spec for Part B
 deployment_manifest:
-  architecture_id: multi_graph_hybrid
-  mode: local  # or cloud
-  components:
-    - { type: vector_db, engine: qdrant }
-    - { type: graph_db, engine: neo4j }
-    - { type: cache, engine: redis }
-    - { type: audit_log, engine: postgres }
-  adapter: membrane.adapters.multigraph_lite
+  id: deploy_cybersecurity_soc_stack
+  mode: local
+  deployment:
+    type: hybrid
+    unified_api: true
+    router:
+      type: query_pattern_routing
+      default_role: session_memory
+      rules:
+        - { when: [temporal_reasoning, causal_chains], use_role: incident_graph }
+        - { when: [similarity_lookup], use_role: runbook_rag }
+    components:
+      - { id: session_memory, role: session_memory, pattern_id: mem0_universal, adapter: adapters.mem0 }
+      - { id: incident_graph, role: incident_graph, pattern_id: graphiti, adapter: adapters.graphiti }
+      - { id: runbook_rag, role: runbook_rag, pattern_id: vector_rag, adapter: adapters.vector_rag }
 ```
 
 ### End-to-end lifecycle

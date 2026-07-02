@@ -199,35 +199,128 @@ class ProductSurfaceBundle(BaseModel):
 
 ---
 
-## Stage 1: MAK context injection
+## Stage 1: Agentic MAK retrieval (replaces single-shot RAG)
 
-Before agents run, query MAK with a **draft query** built from bundles:
+Part A does **not** inject one static RAG blob before profiling. Profiling agents **actively query MAK** while they analyze the codebase and product — like a researcher with the repo open in one window and papers in another.
 
-```python
-draft_signals = (
-    codebase_bundle.memory_signals
-    + product_bundle.feature_list
-    + product_bundle.compliance_mentions
-)
-mak_context = mak.retrieve_for_signals(draft_signals, top_k=10)
-# → relevant paper chunks, Mem0/Zep docs, benchmark notes
+### Passive RAG vs agentic retrieval
+
+| Single-shot RAG (old) | Agentic MAK retrieval (current) |
+|---|---|
+| `mak.search()` once → inject top_k | Agents call `mak_search` repeatedly as hypotheses evolve |
+| Fixed context | Scratchpad grows with each tool call |
+| Sequential agents only | Codebase + MAK research in parallel on shared scratchpad |
+| Weak follow-up questions | `mak_compare`, `mak_get_source_section` mid-investigation |
+
+**MAK storage is unchanged** (vector index + catalog). Only **how Part A uses it** changes: RAG is the library; agents are the readers.
+
+### Architecture
+
+```mermaid
+flowchart TB
+  subgraph inputs [Inputs]
+    CB[CodebaseBundle]
+    PB[ProductSurfaceBundle]
+  end
+
+  subgraph orchestrator [ProfilingOrchestrator]
+    SP[InvestigationScratchpad]
+    CA[Codebase analysis signals]
+    RA[MAK research tool loop]
+    SYN[Synthesize AgentProfile]
+  end
+
+  subgraph mak [MAK tools]
+    T1[mak_search]
+    T2[mak_get_pattern]
+    T3[mak_compare]
+    T4[mak_get_source_section]
+  end
+
+  CB --> CA
+  PB --> CA
+  CA --> SP
+  RA --> SP
+  SP --> SYN
+  RA --> T1
+  RA --> T2
+  RA --> T3
+  RA --> T4
+  T1 --> mak
+  T2 --> mak
+  T3 --> mak
+  T4 --> mak
 ```
 
-MAK does not profile the product — it gives agents **field knowledge** while they profile:
+Implementation: `membrane/analyze/orchestrator.py` · `membrane/knowledge/tools.py`
 
-> "This codebase imports Chroma and has conversation history — here is how Mem0, vector RAG, and conversation summary architectures compare."
+### MAK tools exposed to agents
+
+| Tool | Purpose |
+|---|---|
+| `mak_search(query, tags?, limit?)` | Semantic search over papers + catalog chunks |
+| `mak_get_pattern(pattern_id)` | Full structured pattern YAML fields |
+| `mak_compare(pattern_ids, focus?)` | Side-by-side pattern comparison + evidence |
+| `mak_get_source_section(source_id, section_path?)` | Read a paper section while reasoning |
+
+Tool specs: `MAKToolHandler.tool_specs()` — OpenAI-compatible function definitions.
+
+### Investigation scratchpad
+
+Shared append-only state (`membrane/analyze/scratchpad.py`):
+
+- `codebase_signals` / `product_signals` — from deterministic bundles  
+- `mak_chunks` — evidence accumulated from tool calls  
+- `hypotheses` — e.g. "likely needs temporal graph"  
+- `tool_calls` — full audit trail for RecommendationReport  
+
+Every analyze job logs **why** each search ran — critical for mentor/enterprise trust.
+
+### Agent loop
+
+```python
+orchestrator = ProfilingOrchestrator(max_iterations=8)
+result = orchestrator.run(ProfilingInput(
+    codebase_bundle=codebase_bundle,
+    product_bundle=product_bundle,
+    stated_constraints=constraints,
+))
+# result.scratchpad.tool_calls → audit trail
+# result.profile → ProfileDraft → full AgentProfile
+```
+
+**Modes:**
+
+| Mode | When | Behavior |
+|---|---|---|
+| `heuristic` | No `MEMBRANE_LLM_API_KEY` | Rule-triggered searches from bundle signals (tests, offline) |
+| `agentic` | API key set | LLM tool-calling loop until done or max iterations |
+
+**Guardrails:** `max_iterations` (default 8), token budget per job (future), structured `ProfileDraft` output — not freeform essay.
+
+### Optional: parallel agents
+
+v1 runs a single orchestrator with interleaved codebase seeding + MAK research. v2 can split:
+
+- **CodebaseAgent** — adds `code_observations` to scratchpad  
+- **MAKResearchAgent** — runs tool loop from signals + hypotheses  
+- **MemoryInferenceAgent** — reads scratchpad → `memory_needs`  
+
+Merge rule unchanged: stated constraints override inferred.
 
 ---
 
 ## Stage 2: Profiling agents
 
-v1: **LLM-only synthesis** with structured output. Deterministic bundles are the input evidence; agents interpret.
+v1: **LLM synthesis with agentic MAK tools** (or heuristic tool loop offline). Deterministic bundles seed the scratchpad; agents interpret and query continuously.
+
+**Input change:** agents receive `InvestigationScratchpad` (growing evidence), not a fixed `mak_context` blob.
 
 ### Agent 1: ProductSurfaceAgent
 
 **Runs when:** `ProductSurfaceBundle` present (website/tool URL provided)
 
-**Input:** `ProductSurfaceBundle` + `mak_context`
+**Input:** `ProductSurfaceBundle` + `InvestigationScratchpad` + MAK tools
 
 **Output:**
 
@@ -264,7 +357,7 @@ evidence:
 
 **Runs when:** `CodebaseBundle` present
 
-**Input:** `CodebaseBundle` + `mak_context`
+**Input:** `CodebaseBundle` + `InvestigationScratchpad` + MAK tools
 
 **Output:**
 
@@ -304,7 +397,7 @@ evidence:
 
 **Runs when:** always (merges codebase + product analyses)
 
-**Input:** `ProductSurfaceAnalysis?` + `CodebaseAnalysis?` + `mak_context` + optional `traces`
+**Input:** `ProductSurfaceAnalysis?` + `CodebaseAnalysis?` + `InvestigationScratchpad` + optional `traces` + MAK tools
 
 **Job:** Translate product understanding → memory architecture requirements.
 
@@ -399,7 +492,8 @@ class AgentProfile(BaseModel):
     # Meta
     evidence: list[Evidence]
     confidence: ProfileConfidence
-    mak_context_used: list[str]          # source_ids of MAK chunks used
+    mak_tool_calls: list[str]             # audit: tool + query summaries
+    mak_evidence_ids: list[str]           # source_ids from scratchpad
 
     def to_search_query(self) -> str:
         """For MAK retrieval + composer."""

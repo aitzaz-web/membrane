@@ -1,0 +1,52 @@
+id: cybersecurity_soc_stack
+name: SOC Investigation Memory Stack
+type: hybrid
+description: >
+  Session memory for analyst context, temporal graph for incidents,
+  vector RAG for runbooks — routed by query pattern.
+
+base_patterns:
+  - mem0_universal
+  - graphiti
+  - vector_rag
+
+components:
+  - role: session_memory
+    pattern_id: mem0_universal
+    serves: [profile, semantic]
+    write_path: sync
+    read_path: similarity
+    scope: analyst_sessions_and_preferences
+
+  - role: incident_graph
+    pattern_id: graphiti
+    serves: [temporal, entity, causal]
+    write_path: fast_slow_dual_stream
+    read_path: graph_traversal
+    scope: alerts_incidents_assets
+
+  - role: runbook_rag
+    pattern_id: vector_rag
+    serves: [semantic]
+    write_path: sync
+    read_path: similarity
+    scope: playbooks_and_documentation
+
+router:
+  type: query_pattern_routing
+  default_role: session_memory
+  rules:
+    - when: [temporal_reasoning, entity_traversal, causal_chains]
+      use_role: incident_graph
+      description: Incident correlation and root-cause queries
+    - when: [similarity_lookup]
+      use_role: runbook_rag
+      description: Runbook and doc retrieval
+    - when: [profile_recall]
+      use_role: session_memory
+      description: Analyst preferences and session context
+
+rationale: >
+  Pure vector RAG fails temporal and causal eval on SOC workloads.
+  Graph-only stacks miss fast profile recall. This stack assigns each
+  query pattern to the smallest pattern that covers it.

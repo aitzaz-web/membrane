@@ -4,7 +4,7 @@
 
 Membrane is an open-source meta-layer for LLM-backed products. You call one API (plus optional context about your product, agent, or codebase). Membrane analyzes what you are building, runs evaluations against candidate memory architectures, and recommends — then deploys — the best design under your latency, cost, privacy, and reasoning constraints.
 
-Membrane is **not** another memory store. It does not default to "embeddings in a vector DB." It chooses and composes architectures — vector RAG, temporal graphs, causal graphs, multi-graph hybrids (MAGMA-style), parametric + retrieval (MemVerse-style), and more — based on what your product actually needs.
+Membrane is **not** another memory store. It does not default to "embeddings in a vector DB." It **composes and evaluates** memory stacks — combining vector RAG, temporal graphs, session memory, multi-graph hybrids (MAGMA-style), and more — based on what your product actually needs. The winner may be a **hybrid** built from several catalog patterns, not a single off-the-shelf product.
 
 ---
 
@@ -39,7 +39,7 @@ flowchart LR
 
 ### Part A — Analyze & Recommend
 
-Profiling agents understand your product. An evaluation engine scores candidate architectures. You get a ranked, explainable recommendation.
+Profiling agents understand your product. An evaluation engine scores **monolithic and hybrid** memory stacks. You get a ranked, explainable recommendation — often a composed stack, not a single pattern.
 
 ```
 POST /v1/analyze   →  profile → eval → recommend
@@ -91,38 +91,54 @@ These are starting hypotheses. Membrane's eval engine validates or overrides the
 
 ## Project status
 
-**Early stage.** Architecture and roadmap are defined. Implementation is starting.
+**MAK K1–K5 implemented.** The Memory Architecture Knowledge Base is the current focus — ingest papers and docs, extract architecture knowledge, search the corpus.
+
+```bash
+pip install -e .          # Python 3.11+
+membrane knowledge stats
+membrane knowledge sync awesome-lists
+membrane knowledge ingest arxiv:2601.03236
+membrane knowledge index --rebuild
+membrane knowledge search "temporal graph agent memory"
+```
+
+Set `MEMBRANE_LLM_API_KEY` (and optional `MEMBRANE_LLM_MODEL`) for LLM extraction; without it, a heuristic extractor is used for development.
+
+**Next:** Part A (profiling, eval, recommendation) resumes after MAK K5. See [Part A building strategy](docs/part-a-analyze.md).
 
 Current docs:
 
 - [System architecture](docs/architecture.md) — full diagrams, Part A / Part B split, handoff contract, catalog, eval engine, roadmap
-- [Part A: Analyze & Recommend](docs/part-a-analyze.md) — profiling, eval, selection strategy
+- [Part A: Analyze & Recommend](docs/part-a-analyze.md) — profiling, eval, selection strategy (deferred until MAK K5)
 - [Profiling design](docs/profiling.md) — codebase + website → AgentProfile
 - [Memory Architecture Knowledge Base](docs/memory-knowledge.md) — ingesting papers, docs, and blogs into the catalog
 
 Planned next steps:
 
-1. Shared schemas (`AgentProfile`, `RecommendationReport`, `DeploymentManifest`)
-2. Architecture catalog YAML
-3. Evaluation engine with cybersecurity example profile
-4. Adapter SDK + VectorRAG reference implementation
-5. End-to-end demo: analyze → recommend → deploy locally
+1. Part A schemas (`AgentProfile`, `RecommendationReport`, `DeploymentManifest`)
+2. Evaluation engine with cybersecurity example profile
+3. Architecture composer + selector wired to `MAKClient`
+4. Profiling agent pipeline
+5. MAK K6 product doc crawl + K7 Part A integration
 
 ---
 
-## Repository layout (planned)
+## Repository layout
 
 ```
 membrane/
-├── analyze/          # Part A — profiling, eval, selection
-├── deploy/           # Part B — provisioning, adapters, runtime API
-├── schemas/          # Shared contracts between Part A and Part B
-├── catalog/          # Memory architecture pattern registry
-├── adapters/         # Plugins for Mem0, Graphiti, MAGMA, etc.
-├── benchmarks/       # LoCoMo, LongMemEval, synthetic traces
-├── examples/         # Cybersecurity, chatbot, codebase demos
+├── membrane/
+│   ├── cli.py              # `membrane knowledge` CLI
+│   ├── catalog/            # taxonomy + pattern YAML registry
+│   └── knowledge/          # MAK — fetch, sync, extract, index, search
+├── analyze/                # Part A — profiling, eval, selection (planned)
+├── deploy/                 # Part B — provisioning, adapters, runtime API (planned)
+├── schemas/                # Shared contracts (planned)
+├── adapters/               # Architecture plugins (planned)
+├── benchmarks/             # LoCoMo, LongMemEval, synthetic traces (planned)
+├── examples/               # Domain demos (planned)
+├── tests/
 └── docs/
-    └── architecture.md
 ```
 
 ---

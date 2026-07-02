@@ -1,0 +1,41 @@
+id: langmem_sdk
+name: LangMem SDK Primitives
+version: "1.0"
+sources:
+  - type: product_docs
+    source_id: langmem_docs
+    url: https://blog.langchain.com/langmem-sdk-launch/
+
+taxonomy:
+  memory_types: [semantic, episodic, profile]
+  structures: [vector_index]
+  storage: [retrieval_based]
+
+memory_needs_served: [semantic, profile]
+query_patterns_served: [similarity_lookup, profile_recall]
+
+components:
+  - memory_store_abstraction
+  - semantic_search
+  - memory_manager
+  - langgraph_integration
+
+infra_requirements:
+  - { type: vector_db }
+
+constraints:
+  latency_profile: low
+  cost_profile: low
+  privacy: self_hostable
+  explainability: medium
+
+eval_affinities:
+  benchmarks: [locomo]
+  excels_at: [developer_flexibility, langchain_integration]
+  weak_at: [temporal_reasoning, causal_chains, production_ops]
+
+composable_with: [vector_rag]
+
+implementation:
+  adapter: adapters.langmem
+  reference_impl: adapters.vector_rag_lite

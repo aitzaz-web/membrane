@@ -1,0 +1,63 @@
+# Memory architecture ontology — axes from agent-memory surveys.
+# Used for tagging patterns, extractions, and search filters.
+
+storage:
+  - parametric
+  - retrieval_based
+  - hybrid
+
+structure:
+  - flat_buffer
+  - vector_index
+  - tree
+  - single_graph
+  - multi_graph
+  - mmkg
+
+memory_types:
+  - working
+  - episodic
+  - semantic
+  - procedural
+  - profile
+
+write_path:
+  - sync_only
+  - fast_slow_dual_stream
+  - consolidation_pipeline
+
+read_path:
+  - similarity
+  - graph_traversal
+  - intent_routing
+  - parametric_recall
+
+modality:
+  - text
+  - code
+  - multimodal
+  - structured_events
+
+memory_needs:
+  - temporal
+  - causal
+  - entity
+  - semantic
+  - procedural
+  - profile
+  - multimodal
+
+query_patterns:
+  - temporal_reasoning
+  - causal_chains
+  - entity_traversal
+  - similarity_lookup
+  - profile_recall
+  - tool_memory
+  - audit_provenance
+
+constraints:
+  latency_profile: [ultra_low, low, medium, high]
+  cost_profile: [low, medium, medium_high, high]
+  privacy: [cloud_ok, self_hostable, on_prem_only]
+  explainability: [low, medium, high]

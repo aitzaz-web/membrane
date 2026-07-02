@@ -1,0 +1,42 @@
+id: memverse
+name: MemVerse Parametric + Retrieval Hybrid
+version: "1.0"
+sources:
+  - type: paper
+    source_id: arxiv_memverse
+    url: https://arxiv.org/abs/2412.04470
+
+taxonomy:
+  memory_types: [semantic, episodic]
+  structures: [vector_index]
+  storage: [hybrid]
+
+memory_needs_served: [semantic, multimodal]
+query_patterns_served: [similarity_lookup, profile_recall]
+
+components:
+  - parametric_memory_distillation
+  - retrieval_augmentation
+  - multimodal_encoding
+  - memory_consolidation
+
+infra_requirements:
+  - { type: vector_db }
+  - { type: gpu_inference }
+
+constraints:
+  latency_profile: medium
+  cost_profile: high
+  privacy: self_hostable
+  explainability: low
+
+eval_affinities:
+  benchmarks: [longmemeval, locomo]
+  excels_at: [multimodal, long_horizon]
+  weak_at: [explainability, audit_provenance]
+
+composable_with: [vector_rag]
+
+implementation:
+  adapter: adapters.memverse
+  reference_impl: adapters.vector_rag_lite

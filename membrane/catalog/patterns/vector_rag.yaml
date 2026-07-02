@@ -1,0 +1,38 @@
+id: vector_rag
+name: Vector RAG Baseline
+version: "1.0"
+sources: []
+
+taxonomy:
+  memory_types: [semantic, episodic]
+  structures: [vector_index]
+  storage: [retrieval_based]
+
+memory_needs_served: [semantic]
+query_patterns_served: [similarity_lookup]
+
+components:
+  - chunking
+  - embedding
+  - vector_search
+  - optional_reranker
+
+infra_requirements:
+  - { type: vector_db }
+
+constraints:
+  latency_profile: low
+  cost_profile: low
+  privacy: self_hostable
+  explainability: low
+
+eval_affinities:
+  benchmarks: [locomo, longmemeval]
+  excels_at: [similarity_lookup, simple_faq]
+  weak_at: [temporal_reasoning, causal_chains, entity_traversal]
+
+composable_with: [profile_memory, audit_provenance]
+
+implementation:
+  adapter: adapters.vector_rag
+  reference_impl: adapters.vector_rag_lite

@@ -24,7 +24,7 @@ flowchart TB
 
   subgraph step1 ["Step 1 — Profile the product"]
     Ingest["Ingest repo, spec, traces"]
-    ProfAgents["Profiling agents + MAK RAG"]
+    ProfAgents["ProfilingOrchestrator + MAK tools"]
     Profile["AgentProfile"]
   end
 
@@ -81,107 +81,171 @@ flowchart TB
 
 | Step | What happens | How MAK is used |
 |---|---|---|
-| **1. Profile** | Understand the customer's product | RAG retrieves relevant papers/docs while profiling ("cyber agents need causal graphs — see MAGMA, Graphiti docs") |
-| **2. Compose** | Narrow 50+ patterns → 3–5 candidates | Profile-similarity retrieval + MAK RAG + LLM composition (no binary elimination) |
+| **1. Profile** | Understand the customer's product | **Agentic MAK retrieval** — agents call `mak_search` / `mak_compare` while analyzing codebase + website ([profiling.md](profiling.md)) |
+| **2. Compose** | Narrow 50+ patterns → 3–5 candidates (monoliths + hybrids) | Profile-similarity + **agentic KB queries** + greedy/LLM composition |
 | **3. Evaluate** | Measure candidates on benchmarks | `eval_affinities` per pattern; `reported_metrics` as priors; synthetic traces from profile |
 | **4. Select** | Rank by quality + constraints | Weighted scoring from profile; cross-source citations in report |
 | **5. Deploy handoff** | Emit manifest for Part B | Winner's catalog entry → `DeploymentManifest` |
 
 **MAK alone does not pick the winner.** It narrows the search space and provides evidence. **Eval on the customer's profile** picks the winner.
 
-### Step 1 — Profile the product (with MAK context)
+### Step 1 — Profile the product (agentic MAK retrieval)
 
 Customer calls `POST /v1/analyze` with repo, spec, constraints.
 
-Profiling agents (LLM) produce `AgentProfile`:
+`ProfilingOrchestrator` seeds an `InvestigationScratchpad` from deterministic bundles, then runs an **iterative tool loop** over MAK while analyzing the product — not a single upfront RAG injection.
+
+```python
+result = ProfilingOrchestrator(max_iterations=8).run(ProfilingInput(
+    codebase_bundle=codebase_bundle,
+    product_bundle=product_bundle,
+    stated_constraints=constraints,
+))
+# result.scratchpad.tool_calls → logged for RecommendationReport
+# result.profile → AgentProfile
+```
+
+**MAK tools agents call during profiling:**
+
+```
+mak_search("temporal graph SOC agent memory")
+mak_compare(["vector_rag", "graphiti", "magma_multigraph"], focus="incident correlation")
+mak_get_pattern("graphiti")
+mak_get_source_section("arxiv_2601_03236", section_path="abstract")
+```
+
+**Why agentic, not one-shot RAG:** Profiling is investigative. A codebase signal ("audit_log table, no graph client") should trigger a follow-up search ("causal audit memory patterns") — humans do this naturally.
+
+**Modes:** `agentic` when `MEMBRANE_LLM_API_KEY` is set (LLM chooses tools); `heuristic` offline (rule-triggered searches from bundle signals).
+
+**Eval still picks the winner.** Agents + MAK produce `AgentProfile` and candidates; benchmarks measure them.
+
+Example profile output:
 
 ```yaml
 product_type: cybersecurity_agent
 memory_needs: [temporal, entity, causal, audit]
 query_patterns: [temporal_reasoning, causal_chains, entity_traversal]
-data_modalities: [structured_events, logs, alerts]
 constraints:
   latency_p99_ms: 200
   privacy: on_prem
   explainability: required
-scale:
-  events_per_day: 50000
+mak_tool_calls:
+  - mak_search: "temporal graph agent memory incident correlation"
+  - mak_compare: [vector_rag, graphiti, magma_multigraph]
 ```
 
-**MAK role:** Before/during profiling, retrieve from corpus:
-
-```
-Query: "memory architecture for security agent event logs causal reasoning on-prem"
-→ Returns: MAGMA paper chunks, Graphiti docs, audit log patterns, LoCoMo temporal benchmarks
-→ Profiling agent uses this to fill memory_needs and query_patterns accurately
-```
-
-Without MAK, the profiler guesses. With MAK, it grounds claims in the field's knowledge.
+See [profiling.md](profiling.md) · `membrane/analyze/orchestrator.py` · `membrane/knowledge/tools.py`
 
 ### Step 2 — Generate candidates (no hard filters)
 
 We **do not** use rule-based hard filters (no "disqualify if on-prem"). Constraints are scored dimensions in eval and selection — architectures that poorly fit latency, privacy, or compliance sink in the ranking instead of being removed upfront.
 
-`ArchitectureComposer` runs three passes:
+**Candidates are monoliths or composed hybrids.** Membrane does not only pick one catalog pattern — it proposes **memory stacks** built from multiple patterns where the profile needs more than one capability.
+
+| Candidate type | What it is | Example |
+|---|---|---|
+| **Monolithic** | Single catalog pattern | `vector_rag`, `magma_multigraph` |
+| **Hybrid** | Multiple patterns with roles + router | session memory + incident graph + runbook RAG |
+
+`HybridComposer` (see `membrane/catalog/composer.py`) runs four passes:
 
 **Pass A — Profile-similarity retrieval (catalog + MAK)**
 
 ```python
-# Find patterns most relevant to this profile — similarity, not elimination
-query = profile.to_search_query()  # product_type + memory_needs + query_patterns
+query = profile.to_search_query()
 retrieved = mak.search(query, top_k=15)
 ranked = catalog.rank_by_need_coverage(profile.memory_needs, candidates=retrieved)
-# 52 patterns → top ~12 by relevance (every pattern still eligible if eval surprises)
 ```
 
-Product-type priors (e.g. cyber → graph-heavy patterns) **boost** ranking, they don't gate.
-
-**Pass B — LLM composition (MAK context)**
+**Pass B — Greedy need coverage (deterministic hybrid draft)**
 
 ```python
-context = mak.compare(ranked[:8])  # comparative evidence from papers, docs, blogs
+hybrid = greedy_compose_hybrid(
+    memory_needs=profile.memory_needs,
+    query_patterns=profile.query_patterns,
+)
+# Covers temporal → graphiti, semantic → vector_rag, etc.
+# Uses catalog composable_with edges to avoid incompatible pairings
+```
+
+**Pass C — LLM + recipe refinement (MAK context)**
+
+```python
+context = mak.compare(ranked[:8])
+recipe = load_recipe("cybersecurity_soc_stack")  # product-type template when available
 candidates = composer_llm(
     profile=profile,
     context=context,
-    instruction="Propose 3-5 diverse architectures to benchmark. "
-                "Include vector_rag as baseline. "
-                "Note constraint tradeoffs but do not exclude options.",
+    seeds=[recipe, hybrid, ranked[:3]],
+    instruction="Propose 3-5 candidates to benchmark: monoliths AND hybrid stacks. "
+                "Each hybrid must list components (role, pattern_id, serves) and a router. "
+                "Every component must reference a catalog pattern_id.",
 )
-# e.g. ["vector_rag", "temporal_graph", "multi_graph_hybrid", "mem0_universal"]
 ```
 
-Constraints go into the prompt as **preferences to weigh**, not if/else rules:
-> "Customer wants on-prem, p99 < 200ms, audit logs — prefer patterns that fit but include simpler alternatives for comparison."
+**Pass D — Diversity check**
 
-**Pass C — Diversity check**
+Ensure the eval set includes:
+- `vector_rag` monolithic baseline (always)
+- At least one **profile-composed hybrid**
+- At least one strong monolith (e.g. `magma_multigraph` for graph-heavy profiles)
+- Optional product-type **recipe** (e.g. `cybersecurity_soc_stack`)
 
-Ensure candidates span a range (simple → complex, vector → graph) so eval can show tradeoffs in the report.
+**Output:** 3–5 `ArchitectureCandidate` objects — mix of `MonolithicCandidate` and `HybridArchitecture`.
 
-**Output:** 3–5 candidates for eval, always including `vector_rag` baseline.
+Example hybrid (cyber SOC):
+
+```yaml
+id: cybersecurity_soc_stack
+type: hybrid
+components:
+  - { role: session_memory, pattern_id: mem0_universal, serves: [profile, semantic] }
+  - { role: incident_graph, pattern_id: graphiti, serves: [temporal, entity, causal] }
+  - { role: runbook_rag, pattern_id: vector_rag, serves: [semantic] }
+router:
+  type: query_pattern_routing
+  rules:
+    - { when: [temporal_reasoning, causal_chains], use_role: incident_graph }
+    - { when: [similarity_lookup], use_role: runbook_rag }
+  default_role: session_memory
+```
+
+Schemas: `membrane/schemas/hybrid.py` · Recipe: `catalog/recipes/cybersecurity_soc_stack.yaml`
 
 ### Step 3 — Evaluate (prove it, don't guess)
 
-For each candidate, run the eval harness:
+For each candidate — **monolithic or hybrid** — run the eval harness.
 
 **Eval corpus** (two sources):
 1. **Profile-weighted standard benchmarks** — LoCoMo temporal questions if profile needs temporal; LongMemEval if long-horizon
 2. **Synthetic traces** — TraceSynthesizer generates security incident Q&A from profile + optional customer traces
 
+Questions are tagged with `query_pattern` (e.g. `temporal_reasoning`, `similarity_lookup`) so hybrid routers can be tested fairly.
+
 **Run:**
 
 ```python
-for arch in candidates:
-    adapter = load_adapter(arch.implementation.reference_impl)
+for candidate in candidates:
+    if candidate.type == "monolithic":
+        adapter = load_adapter(candidate.pattern_id)
+    else:
+        adapter = HybridLiteAdapter(candidate)  # routes to vector_rag_lite, temporal_graph_lite, etc.
+
     adapter.ingest(eval_corpus.events)
     results = adapter.run_queries(eval_corpus.questions)
-    scores[arch.id] = {
-        "quality": judge(results, eval_corpus.ground_truth),      # temporal, causal, semantic
-        "latency_fit": measure_latency_fit(adapter, profile.constraints),  # 0-1 vs p99 budget
-        "privacy_fit": score_privacy_fit(arch, profile.constraints),
-        "compliance_fit": score_compliance_fit(arch, profile.constraints),
-        "cost_fit": estimate_cost_fit(arch, profile.scale, profile.constraints),
+    scores[candidate.id] = {
+        "quality": judge(results, eval_corpus.ground_truth),
+        "latency_fit": measure_latency_fit(adapter, profile.constraints),
+        "privacy_fit": score_privacy_fit(candidate, profile.constraints),
+        "compliance_fit": score_compliance_fit(candidate, profile.constraints),
+        "cost_fit": estimate_cost_fit(candidate, profile.scale, profile.constraints),
+        # optional per-component breakdown for hybrids
+        "component_scores": adapter.per_role_scores() if hybrid else {},
     }
 ```
+
+For hybrids, `HybridLiteAdapter` routes each eval question to the component role declared in `router.rules`, then aggregates scores — same outward interface as a monolithic adapter.
 
 Constraints are **measured**, not assumed from catalog metadata. A pattern that claims on-prem support but fails isolation tests scores low on `privacy_fit`.
 
@@ -192,12 +256,14 @@ Constraints are **measured**, not assumed from catalog metadata. A pattern that 
 
 **Example scores (cybersecurity profile):**
 
-| Architecture | Quality | Latency fit | Privacy fit | Compliance fit | Overall |
-|---|---|---|---|---|---|
-| vector_rag | 0.41 | 0.95 | 0.90 | 0.20 | 0.52 |
-| temporal_graph | 0.62 | 0.70 | 0.85 | 0.55 | 0.64 |
-| multi_graph_hybrid | 0.87 | 0.75 | 0.88 | 0.92 | **0.84** |
-| mem0_universal | 0.48 | 0.88 | 0.40 | 0.30 | 0.45 |
+| Candidate | Type | Quality | Latency fit | Privacy fit | Compliance fit | Overall |
+|---|---|---|---|---|---|---|
+| vector_rag | monolithic | 0.41 | 0.95 | 0.90 | 0.20 | 0.52 |
+| magma_multigraph | monolithic | 0.87 | 0.75 | 0.88 | 0.92 | 0.84 |
+| cybersecurity_soc_stack | **hybrid** | 0.85 | 0.82 | 0.86 | 0.90 | **0.86** |
+| mem0_universal | monolithic | 0.48 | 0.88 | 0.40 | 0.30 | 0.45 |
+
+A composed stack can **match or beat** a research monolith by assigning each query pattern to the right component — eval proves it, not the composer alone.
 
 `mem0_universal` stays in the race — it scores well on latency but tanks on privacy/compliance fit for this profile. The report explains that, rather than hiding it behind a filter.
 
@@ -224,28 +290,51 @@ No disqualification. Low constraint fit → low overall → ranked down + called
 **RecommendationReport** cites MAK + eval:
 
 ```markdown
-## Winner: multi_graph_hybrid
+## Winner: cybersecurity_soc_stack (hybrid)
 
-Scores 0.87 overall on your cybersecurity profile eval.
+Scores 0.86 overall on your cybersecurity profile eval.
+
+**Stack:**
+| Role | Pattern | Serves |
+|---|---|---|
+| session_memory | mem0_universal | profile, semantic |
+| incident_graph | graphiti | temporal, entity, causal |
+| runbook_rag | vector_rag | semantic / runbooks |
 
 **Why it won:**
-- Causal reasoning: 0.89 vs 0.18 (vector_rag) — decisive for incident root-cause queries
-- Temporal: 0.91 vs 0.22 (vector_rag)
-- Meets explainability requirement via graph traversal paths
+- Routed temporal/causal questions to graphiti — 0.89 vs 0.18 (vector_rag alone)
+- Kept runbook lookup on vector RAG — fast, sufficient for similarity queries
+- Session memory handles profile recall without overloading the graph
 
 **Tradeoffs:**
-- p99 180ms — within your 200ms budget but 4x slower than vector_rag
-- Requires graph_db + vector_db (see DeploymentManifest)
+- Three components vs one — higher ops complexity (see DeploymentManifest)
+- p99 165ms — within 200ms budget; faster than monolithic multi-graph on simple queries
 
 **Evidence:**
-- MAGMA (ACL 2026): multi-graph design for temporal+causal agent memory
 - Graphiti docs: production temporal graphs for agents
-- Membrane eval: synthetic security incident corpus, 120 questions
+- Mem0 docs: session-scoped memory API patterns
+- Membrane eval: 120-question synthetic SOC corpus with query_pattern routing
 
-**Runner-up:** temporal_graph (0.62) — simpler, consider if causal eval less critical
+**Runner-up:** magma_multigraph (0.84) — simpler deploy, consider if you want one vendor/stack
 ```
 
-**DeploymentManifest** auto-generated from winner's catalog entry.
+**DeploymentManifest** describes the full stack for Part B — one unified Memory API outward, router inward:
+
+```yaml
+deployment:
+  type: hybrid
+  unified_api: true
+  router:
+    type: query_pattern_routing
+    default_role: session_memory
+    rules: [...]
+  components:
+    - { id: session_memory, pattern_id: mem0_universal, adapter: adapters.mem0 }
+    - { id: incident_graph, pattern_id: graphiti, adapter: adapters.graphiti }
+    - { id: runbook_rag, pattern_id: vector_rag, adapter: adapters.vector_rag }
+```
+
+Schema: `membrane/schemas/manifest.py` · `hybrid_to_manifest()` in `catalog/composer.py`
 
 ### What if MAK is empty / early stage?
 
@@ -337,6 +426,261 @@ The moat is step 4. Anyone can guess architecture from product type. Membrane **
 | A.4 | Architecture catalog | — | Pattern registry + composer rules | — |
 | A.5 | Evaluation engine | Profile + candidates | Per-architecture scores | A.3, A.4, adapters |
 | A.6 | Selector & reporter | Scores + profile | `RecommendationReport`, `DeploymentManifest` | A.5 |
+
+---
+
+---
+
+## Part A building strategy
+
+> **Current priority (2025):** Build MAK K1–K5 first. Part A milestones below resume after the knowledge base is queryable. See [memory-knowledge.md](memory-knowledge.md) and `membrane knowledge --help`.
+
+How we build Part A — principles, tracks, milestones, and what to ship when **after MAK K5 is done**.
+
+### Core principles
+
+| Principle | What it means |
+|---|---|
+| **MAK-first** | Ship fetch → sync → extract → index → search before eval or profiling. Recommendations need evidence. |
+| **Eval proves the moat** | Once MAK is queryable, build the judging system before profiling agents. |
+| **Vertical slice** | Cybersecurity end-to-end first. One domain done well beats three domains half-built. |
+| **Hand-written profile bootstrap** | `examples/cybersecurity/profile.yaml` unblocks compose + eval while profiling is in progress. |
+| **Thin adapters early** | `vector_rag_lite`, `temporal_graph_lite`, `multi_graph_lite` — minimal but real enough to benchmark. |
+| **Every phase demoable** | Each milestone has a CLI command that produces visible output. |
+| **No hard filters** | Constraint-fit scoring in eval from day one, not rule-based elimination. |
+
+### Build order (current)
+
+```mermaid
+flowchart LR
+  MAK["MAK K1-K5 in progress"]
+  A0["Part A A0 contracts"]
+  A2["Part A A2 eval"]
+  A1["Part A A1 compose + select"]
+  A3["Part A A3 profiling"]
+  A4["Part A A4 API"]
+  K7["MAK K7 wire into Part A"]
+
+  MAK --> A0 --> A2 --> A1 --> A3 --> A4
+  MAK --> K7
+  K7 -.->|enriches| A1
+  K7 -.->|enriches| A3
+```
+
+**Now:** MAK K1–K5 (`membrane knowledge sync|fetch|extract|index|search`).  
+**Next:** Part A contracts + eval harness, then compose/select, profiling, API.  
+**Then:** MAK K7 wires `MAKClient` into compose + profiling agents.
+
+### Three tracks (after MAK K5)
+
+```mermaid
+flowchart TB
+  subgraph track_contracts ["Track 1 — Contracts"]
+    T1A["Schemas"]
+    T1B["Catalog + taxonomy — bootstrap done in MAK K0"]
+    T1C["Cyber example profile + eval corpus"]
+  end
+
+  subgraph track_core ["Track 2 — Part A core path"]
+    T2A["Compose candidates"]
+    T2B["Eval harness"]
+    T2C["Select + report + manifest"]
+    T2D["Profiling"]
+    T2E["Full API"]
+  end
+
+  subgraph track_mak ["Track 3 — MAK enrichment"]
+    T3A["K6 product doc crawl"]
+    T3B["Continuous sync schedulers"]
+    T3C["K7 MAKClient in Part A"]
+  end
+
+  T1A --> T2A
+  T1B --> T2A
+  T1C --> T2B
+  T2A --> T2B --> T2C
+  T2C --> T2D --> T2E
+  T3C -.->|enriches| T2A
+  T3C -.->|enriches| T2D
+```
+
+**Track 1** blocks Part A. **Track 2** is the Part A critical path. **Track 3** continues MAK growth and wires retrieval into Part A (K7).
+
+### Build phases (sequential within Track 2)
+
+#### Milestone 1 — Contracts (A0)
+
+**Ship:** The language Part A speaks.
+
+```
+membrane/
+├── schemas/           agent_profile, analyze_request, recommendation, deployment_manifest
+├── catalog/
+│   ├── taxonomy.yaml
+│   └── patterns/      8-10 hand-seeded YAML patterns
+└── examples/cybersecurity/
+    ├── profile.yaml   hand-written from domain knowledge
+    └── eval_corpus.jsonl
+```
+
+**Demo:** Load and validate schemas + example files.
+
+**Effort:** Small. Do this first.
+
+---
+
+#### Milestone 2 — Eval harness (A2) ← build before compose polish
+
+**Why eval before profiling:** Proves the moat. You can run `profile.yaml` → scores → report without any LLM profiling or MAK.
+
+**Ship:**
+- `adapters/base.py` — `write`, `query`, `benchmark` interface
+- `adapters/vector_rag_lite.py` — baseline
+- `adapters/temporal_graph_lite.py` — graph baseline
+- `adapters/multi_graph_lite.py` — hybrid (cyber winner)
+- `analyze/eval/runner.py` — ingest → query → judge
+- `analyze/eval/scorer.py` — quality + latency_fit + privacy_fit + compliance_fit + cost_fit
+- `analyze/eval/suites/cybersecurity/` — domain eval pack (~50-120 questions)
+- `analyze/eval/judge.py` — fixed LLM-as-judge protocol
+
+**Demo:**
+```bash
+membrane eval --profile examples/cybersecurity/profile.yaml \
+  --candidates vector_rag,multi_graph_hybrid
+```
+
+**Success criteria:**
+- `multi_graph_hybrid` beats `vector_rag` on quality + compliance_fit for cyber profile
+- Scores are reproducible (disclosed judge + prompts)
+- Constraint dimensions appear in output
+
+---
+
+#### Milestone 3 — Compose + select (A1 + A6)
+
+**Ship:**
+- `analyze/catalog/composer.py` — profile-similarity retrieval + 3-5 candidate selection
+- `analyze/select/selector.py` — weighted scoring from eval results
+- `analyze/select/reporter.py` — markdown RecommendationReport
+- `analyze/select/manifest.py` — DeploymentManifest from winner catalog entry
+
+**Demo:**
+```bash
+membrane recommend --profile examples/cybersecurity/profile.yaml
+# → ranked list + report + deployment_manifest.yaml
+```
+
+**Note:** Milestone 2 + 3 together = **Part A MVP**.
+
+```bash
+membrane analyze --profile examples/cybersecurity/profile.yaml
+```
+
+---
+
+#### Milestone 4 — Profiling (A3)
+
+**Ship:** [profiling.md](profiling.md) design — public GitHub + website only.
+
+```
+analyze/profile/
+├── collect/
+│   ├── codebase_bundle.py    shallow clone, memory signals, file select
+│   └── product_surface.py    website crawler
+├── agents/
+│   ├── product_surface.py
+│   ├── codebase.py
+│   ├── memory_inference.py
+│   └── constraint_merger.py
+└── merge.py                  → AgentProfile
+```
+
+**Demo:**
+```bash
+membrane profile --repo https://github.com/org/soc-agent --url https://org.com/product
+membrane analyze --repo ... --url ...   # full pipeline, no hand-written profile
+```
+
+**Depends on:** Milestone 3 working. MAK optional (agents work without it, better with it).
+
+---
+
+#### Milestone 5 — API + orchestration (A4)
+
+**Ship:**
+- `analyze/api/` — FastAPI `POST /v1/analyze`, `GET /v1/jobs/{id}`
+- Job states: `profiling → composing → evaluating → selecting → complete`
+- `needs_clarification` when profile confidence low
+- CLI mirrors API
+
+**Demo:**
+```bash
+membrane analyze --repo URL --url URL --constraints constraints.yaml
+```
+
+---
+
+#### Milestone 6 — MAK integration (Track 3 → Track 2)
+
+**Ship:** When MAK has index + catalog (see [memory-knowledge.md](memory-knowledge.md) K1–K7):
+- `MAKClient.retrieve_for_profile()` in compose
+- `MAKClient` context in profiling agents
+- Citations from corpus in reports
+
+**Not blocking** Milestones 1–5.
+
+### What we deliberately defer
+
+| Deferred | Why |
+|---|---|
+| Private GitHub repos | Public only v1 |
+| LoCoMo / LongMemEval full integration | Cyber domain pack first; add standard suites after |
+| TraceSynthesizer (LLM-generated eval) | Hand-written `eval_corpus.jsonl` first |
+| HTTP API / hosted service | CLI + local first |
+| All 50+ catalog patterns | 8–10 hand-seeded, MAK grows the rest |
+| Part B adapters in production | `*_lite` stubs sufficient for eval |
+
+### Team-of-one vs parallel work
+
+**Solo developer order (updated):**
+1. ~~MAK K1–K5~~ (in progress / done)
+2. Part A A0 contracts
+3. Part A A2 eval (cyber pack + 3 adapters)
+4. Part A A1/A6 compose + select + report
+5. Part A A3 profiling
+6. Part A A4 API
+7. MAK K6–K7 + wire into Part A
+
+**If two people:**
+- Person A: Track 2 (eval → compose → profiling → API)
+- Person B: Track 3 (MAK) + shared `adapters/base.py`
+
+### Definition of done — Part A v1
+
+| Criteria | Verified by |
+|---|---|
+| Hand-written cyber profile → eval → recommendation | `membrane analyze --profile ...` |
+| `multi_graph_hybrid` wins cyber profile with explainable deltas | Eval output |
+| Public repo + website → auto-generated profile | `membrane profile --repo --url` |
+| Full pipeline via API | `POST /v1/analyze` |
+| Report cites evidence (eval + optional MAK) | RecommendationReport markdown |
+| DeploymentManifest valid for Part B | Schema validation |
+
+### First week concrete checklist
+
+**MAK (done / in progress):**
+- [x] `pyproject.toml` + package layout
+- [x] `catalog/taxonomy.yaml` + 8 bootstrap pattern YAMLs
+- [x] `membrane knowledge` CLI (sync, fetch, extract, review, index, search)
+- [x] Awesome-list sync → 100+ sources in registry
+- [x] arXiv fetch + paper_flow + vector index
+
+**Part A (next):**
+- [ ] `schemas/agent_profile.py` + related models
+- [ ] `examples/cybersecurity/profile.yaml`
+- [ ] `examples/cybersecurity/eval_corpus.jsonl`
+- [ ] `adapters/base.py` + `vector_rag_lite.py`
+- [ ] `analyze/eval/runner.py` skeleton (one question, one adapter)
 
 ---
 
@@ -521,10 +865,13 @@ ranked = mak.retrieve_for_profile(profile, top_k=12)
 
 | Strategy | Description |
 |---|---|
-| **MAK-guided selection** | LLM picks diverse candidates from top-ranked + corpus evidence |
-| **Greedy compose** | Hybrid compositions that cover memory_needs |
-| **Catalog recipes** | Starting points per product_type (cybersecurity recipe, etc.) |
-| **Always include baseline** | `vector_rag` in every eval run |
+| **Greedy hybrid compose** | Cover `memory_needs` with catalog patterns + router (deterministic) |
+| **Product recipes** | Starting hybrid templates (e.g. `cybersecurity_soc_stack`) |
+| **MAK-guided refinement** | LLM adjusts components using corpus evidence |
+| **Monolithic alternatives** | Best single-pattern cover + research monoliths (MAGMA) for comparison |
+| **Always include baseline** | `vector_rag` monolith in every eval run |
+
+Output: `ArchitectureCandidate` = `MonolithicCandidate` \| `HybridArchitecture`. See `membrane/catalog/composer.py`.
 
 Constraints passed as context: *"prefer on-prem, p99 < 200ms, audit required — still include simpler alternatives."*
 

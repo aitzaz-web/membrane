@@ -1,0 +1,42 @@
+id: letta_stateful
+name: Letta Stateful Agent Memory
+version: "1.0"
+sources:
+  - type: product_docs
+    source_id: letta_docs
+    url: https://docs.letta.com
+
+taxonomy:
+  memory_types: [working, episodic, semantic, procedural]
+  structures: [flat_buffer, vector_index]
+  storage: [hybrid]
+
+memory_needs_served: [semantic, procedural, profile]
+query_patterns_served: [profile_recall, tool_memory, similarity_lookup]
+
+components:
+  - core_memory_blocks
+  - archival_memory
+  - recall_memory
+  - tool_execution_context
+
+infra_requirements:
+  - { type: vector_db }
+  - { type: agent_runtime }
+
+constraints:
+  latency_profile: medium
+  cost_profile: medium_high
+  privacy: self_hostable
+  explainability: medium
+
+eval_affinities:
+  benchmarks: [longmemeval]
+  excels_at: [tool_memory, agent_state, procedural]
+  weak_at: [temporal_reasoning, causal_chains]
+
+composable_with: [vector_rag, audit_provenance]
+
+implementation:
+  adapter: adapters.letta
+  reference_impl: adapters.vector_rag_lite

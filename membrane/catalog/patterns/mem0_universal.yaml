@@ -1,0 +1,41 @@
+id: mem0_universal
+name: Mem0 Universal Memory Layer
+version: "1.0"
+sources:
+  - type: product_docs
+    source_id: mem0_docs
+    url: https://docs.mem0.ai
+
+taxonomy:
+  memory_types: [episodic, semantic, profile]
+  structures: [vector_index]
+  storage: [retrieval_based]
+
+memory_needs_served: [semantic, profile]
+query_patterns_served: [similarity_lookup, profile_recall]
+
+components:
+  - memory_extraction
+  - vector_store
+  - memory_update
+  - user_session_scoping
+
+infra_requirements:
+  - { type: vector_db }
+
+constraints:
+  latency_profile: low
+  cost_profile: medium
+  privacy: cloud_ok
+  explainability: medium
+
+eval_affinities:
+  benchmarks: [locomo, longmemeval]
+  excels_at: [simple_faq, user_preferences, conversation_summary]
+  weak_at: [causal_chains, temporal_reasoning, audit_provenance]
+
+composable_with: [vector_rag]
+
+implementation:
+  adapter: adapters.mem0
+  reference_impl: adapters.vector_rag_lite

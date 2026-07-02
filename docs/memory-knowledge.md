@@ -1,5 +1,7 @@
 # Memory Architecture Knowledge Base (MAK)
 
+> **Current build focus:** MAK K1–K5 — multi-source ingestion, awesome-list discovery, LLM extraction + review, vector search via `membrane knowledge`. Part A and K6+ (product doc crawl) follow after K5 is validated.
+
 How Membrane accumulates, structures, and uses knowledge about memory architectures — from research papers (MAGMA, MemVerse, A-MEM) to engineering docs (Mem0, Zep, LangMem) and blogs.
 
 **Goal:** Part A's recommendations are grounded in the widest available evidence, not a handful of hardcoded patterns.
@@ -732,29 +734,41 @@ All flows emit:
 | `poll-rss` | Daily | RSS URLs | New blog posts |
 | `arxiv-diff` | Daily | cs.AI/cs.CL keywords | New papers |
 
-### Stage 2 — How Part A queries MAK
+### Stage 2 — How Part A queries MAK (agentic retrieval)
+
+MAK keeps a **vector index + catalog** (passive storage). Part A uses **agentic tool loops** — not single-shot RAG — to query while thinking.
 
 ```python
-# membrane/analyze/catalog/mak_client.py
+# membrane/knowledge/client.py + membrane/knowledge/tools.py
 
 class MAKClient:
-    def search(self, query: str, tags: list[str] | None = None) -> list[EvidenceChunk]:
-        """Semantic search over full corpus."""
+    def search(...) -> list[SearchResult]
+    def get_pattern(pattern_id) -> ArchitecturePattern
+    def compare(pattern_ids, focus?) -> ComparisonContext
+    def get_source_section(source_id, section_path?) -> str
 
-    def get_pattern(self, pattern_id: str) -> ArchitectureCard:
-        """Structured catalog lookup."""
+class MAKToolHandler:
+    def tool_specs() -> list[dict]   # OpenAI-compatible tools
+    def execute(tool_name, arguments) -> dict
+```
 
-    def compare(self, pattern_ids: list[str]) -> ComparisonContext:
-        """RAG + catalog fields for composer."""
+```python
+# membrane/analyze/orchestrator.py
 
-    def context_for_profile(self, profile: AgentProfile) -> MAKContext:
-        """Pre-built retrieval for profiling + compose steps."""
+class ProfilingOrchestrator:
+    def run(ProfilingInput) -> ProfilingResult:
+        # Seeds InvestigationScratchpad from bundles
+        # Iterative mak_search / mak_compare while analyzing
+        # Returns ProfileDraft + tool_call audit trail
 ```
 
 Used by:
-- **Profiling agents** — `context_for_profile()` injects relevant papers/docs
-- **ArchitectureComposer** — `retrieve_for_profile()` + `compare()` → candidate set for eval
-- **Reporter** — `get_pattern()` + chunk citations for evidence section
+- **ProfilingOrchestrator** — iterative `mak_search`, `mak_compare`, `mak_get_pattern` while reading codebase/product bundles
+- **HybridComposer** (planned) — agentic queries while assembling stacks
+- **Recommendation reporter** — citations from scratchpad `tool_calls` + evidence chunks
+- **CLI** — `membrane knowledge search` remains simple one-shot search for humans
+
+**Single-shot RAG** is still valid for CLI and fast priors; **agentic retrieval** is the Part A default for profile + compose.
 
 ### CLI (QuantMind-style UX)
 

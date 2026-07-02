@@ -1,0 +1,42 @@
+id: graphiti
+name: Graphiti Temporal Knowledge Graph
+version: "1.0"
+sources:
+  - type: product_docs
+    source_id: zep_graphiti_docs
+    url: https://help.getzep.com/graphiti
+
+taxonomy:
+  memory_types: [episodic, semantic]
+  structures: [single_graph]
+  graphs: [temporal, entity, semantic]
+
+memory_needs_served: [temporal, entity, semantic]
+query_patterns_served: [temporal_reasoning, entity_traversal, similarity_lookup]
+
+components:
+  - bi_temporal_modeling
+  - entity_extraction
+  - graph_ingestion
+  - hybrid_graph_vector_retrieval
+
+infra_requirements:
+  - { type: graph_db }
+  - { type: vector_db }
+
+constraints:
+  latency_profile: medium
+  cost_profile: medium_high
+  privacy: self_hostable
+  explainability: high
+
+eval_affinities:
+  benchmarks: [locomo_temporal, longmemeval_temporal]
+  excels_at: [temporal_reasoning, entity_traversal, conversation_history]
+  weak_at: [ultra_low_latency, multimodal]
+
+composable_with: [audit_provenance, vector_rag]
+
+implementation:
+  adapter: adapters.graphiti
+  reference_impl: adapters.temporal_graph_lite

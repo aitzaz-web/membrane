@@ -1,0 +1,41 @@
+id: a_mem
+name: A-MEM Agentic Memory with Zettelkasten
+version: "1.0"
+sources:
+  - type: paper
+    source_id: arxiv_a_mem
+    url: https://arxiv.org/abs/2502.12110
+
+taxonomy:
+  memory_types: [episodic, semantic]
+  structures: [tree, vector_index]
+  storage: [retrieval_based]
+
+memory_needs_served: [semantic, entity]
+query_patterns_served: [similarity_lookup, entity_traversal]
+
+components:
+  - note_generation
+  - link_discovery
+  - memory_evolution
+  - vector_retrieval
+
+infra_requirements:
+  - { type: vector_db }
+
+constraints:
+  latency_profile: medium
+  cost_profile: medium
+  privacy: self_hostable
+  explainability: medium
+
+eval_affinities:
+  benchmarks: [locomo, longmemeval]
+  excels_at: [semantic_organization, long_horizon]
+  weak_at: [ultra_low_latency, causal_chains]
+
+composable_with: [vector_rag]
+
+implementation:
+  adapter: adapters.a_mem
+  reference_impl: adapters.vector_rag_lite

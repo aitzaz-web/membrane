@@ -1,0 +1,45 @@
+id: magma_multigraph
+name: MAGMA Multi-Graph Agentic Memory
+version: "1.0"
+sources:
+  - type: paper
+    source_id: arxiv_2601_03236
+    url: https://arxiv.org/abs/2601.03236
+  - type: code
+    source_id: github_magma
+    url: https://github.com/FredJiang0324/MAGMA
+
+taxonomy:
+  memory_types: [episodic, semantic]
+  structures: [multi_graph, vector_index]
+  graphs: [semantic, temporal, causal, entity]
+
+memory_needs_served: [temporal, causal, entity, semantic]
+query_patterns_served: [temporal_reasoning, causal_chains, entity_traversal, similarity_lookup]
+
+components:
+  - fast_path_synaptic_ingestion
+  - async_consolidation
+  - intent_router
+  - policy_guided_graph_traversal
+
+infra_requirements:
+  - { type: vector_db }
+  - { type: graph_db }
+
+constraints:
+  latency_profile: medium
+  cost_profile: medium_high
+  privacy: self_hostable
+  explainability: high
+
+eval_affinities:
+  benchmarks: [locomo_temporal, locomo_multi_hop, longmemeval_temporal]
+  excels_at: [temporal_reasoning, causal_reasoning, long_horizon]
+  weak_at: [ultra_low_latency, simple_faq]
+
+composable_with: [audit_provenance, profile_memory]
+
+implementation:
+  adapter: adapters.magma
+  reference_impl: adapters.multigraph_lite
